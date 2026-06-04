@@ -1,0 +1,58 @@
+[project]
+name = "ehri-cate"
+version = "0.1.0"
+description = "EHRI NER Cataloguing & Labelling Tool — evaluation harness for LLM-based subject indexing against EHRI Terms"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "annif>=1.4.1,<2",
+    "rdflib>=7.1",
+    "litellm>=1.50",
+    "python-dotenv>=1.0",
+    "click>=8.1",
+]
+
+[project.scripts]
+cate = "ehri_cate.cli:main"
+
+[tool.uv]
+# Include the baselines group in local dev envs by default, so plain `uv run
+# cate ...` has the Annif backends available. `uv sync --no-group baselines`
+# gives a lightweight LLM-only env (no TensorFlow / fastText / omikuji).
+default-groups = ["dev", "baselines"]
+
+[tool.uv.sources]
+# omikuji has no working macOS-arm64 distribution: its cp312 "universal2" wheel
+# on PyPI ships an x86_64-only binary (won't dlopen on Apple Silicon), and the
+# sdist's Cargo.lock pins `time 0.3.30`, which fails to compile on Rust >= 1.80.
+# We vendor a locally-built arm64 wheel (see scripts/build_omikuji_macos_arm64.sh
+# for exact provenance) and use it only on macOS-arm64; every other platform
+# falls back to PyPI (Linux/Windows wheels work).
+omikuji = [
+    { path = "wheels/omikuji-0.5.1-cp312-cp312-macosx_11_0_arm64.whl", marker = "sys_platform == 'darwin' and platform_machine == 'arm64'" },
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ehri_cate"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+]
+# Supervised Annif baselines (TF-IDF, MLLM, fastText, Omikuji, NN Ensemble).
+# We add tensorflow/keras/lmdb/fasttext/omikuji as raw deps rather than via
+# annif's own [fasttext]/[omikuji]/[nn] extras: the [nn] extra pins
+# `tensorflow-cpu`, which has no macOS-arm64 wheel. Plain `tensorflow` does, and
+# annif's nn_ensemble backend only needs tensorflow/keras importable at runtime.
+baselines = [
+    "iterative-stratification>=0.1.9",
+    "fasttext-numpy2==0.10.4",
+    "omikuji==0.5.*",  # no py3.13 support (why we pin 3.12); macOS-arm64 wheel vendored — see [tool.uv.sources]
+    "lmdb>=1.7,<1.8",
+    "tensorflow>=2.20,<2.21",
+    "keras>=3.0",
+]
