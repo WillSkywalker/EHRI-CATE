@@ -3,6 +3,8 @@ name = "ehri-cate"
 version = "0.1.0"
 description = "EHRI NER Cataloguing & Labelling Tool — evaluation harness for LLM-based subject indexing against EHRI Terms"
 readme = "README.md"
+license = "EUPL-1.2"
+license-files = ["LICENSE"]
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "annif>=1.4.1,<2",

@@ -185,7 +185,3 @@ as published results.
 - Few-shot prompting or archival-context enrichment (parent/sibling descriptions).
 - Entity linking (Camps/Ghettos) and date extraction — the other two pilot tracks.
 - Web service API and mock Portal admin UI — roadmap steps 4 and 5.
-
-## License
-
-EHRI-3 project work, EHRI / NIOD-KNAW. License TBD.
