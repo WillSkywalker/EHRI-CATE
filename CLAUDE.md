@@ -30,7 +30,7 @@ src/ehri_cate/
 ├── backends/
 │   ├── llm4ssh.py        # zero-shot LLM backend over the LiteLLM proxy
 │   └── annif_backend.py  # 5 supervised Annif baselines (train via CLI, suggest in-process)
-└── cli.py                # `cate evaluate` (LLM + --annif) and `cate train-baselines`
+└── cli.py                # `cate evaluate` (LLM + --annif), `cate train-baselines`, `cate label` (ad-hoc stdin)
 scripts/                  # build_omikuji_macos_arm64.sh — provenance for the vendored wheel
 wheels/                   # vendored omikuji macOS-arm64 wheel (no working PyPI build exists)
 tests/                    # scorer + rate-limiter + split tests; guarded Annif integration test
@@ -92,7 +92,7 @@ At 30 RPM, the LLM portion has a hard floor of `(sample_size × n_models) / 30` 
 ## Things deliberately not done yet
 
 - **Annif hyper-parameter tuning** — the five baselines (TF-IDF, MLLM, fastText, Omikuji, NN Ensemble) are wired and trainable via `--annif`, but with sensible default params and the language-neutral `simple` analyzer; the paper's exact hyper-params weren't fully published. Tuning + a multilingual analyzer strategy are open.
-- **Prompt iteration / few-shot / archival-context enrichment** — single zero-shot prompt only.
+- **Prompt iteration / few-shot / archival-context enrichment** — a single zero-shot prompt ships as the default, but it can now be swapped per-run via `cate evaluate --prompt-template <file.toml>` (`system`/`user` keys; `user` must keep `{text}`/`{candidates}` and the numbered-JSON output contract). The default is unchanged, so comparability holds; few-shot and archival-context enrichment are still not built.
 - **Entity linking (Camps/Ghettos), date extraction** — pilot tracks #2 and #3, untouched.
 - **Web service + mock Portal UI** — roadmap steps 4 and 5.
 
