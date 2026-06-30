@@ -44,10 +44,13 @@ You also need the corpus and the SKOS vocabulary in `data/` (both gitignored):
 ## Usage
 
 ```bash
-# Default: 50 test-split rows × 3 LLMs (Mistral-Small, DeepSeek-V3.1, MiniMax-M2.5)
+# List the models the proxy currently serves (default marked)
+uv run cate models
+
+# Default: 50 test-split rows × the default LLM (DeepSeek-V3.1-vLLM)
 uv run cate evaluate
 
-# Single LLM, larger sample
+# Single (or several — repeat --model) LLMs, larger sample
 uv run cate evaluate -n 167 --model DeepSeek-V3.1-vLLM --output results/deepseek-167.json
 
 # Supervised Annif baselines only (no API key needed); trains on first use
@@ -71,17 +74,20 @@ uv run cate evaluate --help
 
 `cate label` runs a single LLM over text from **stdin** (or a file) and prints suggested
 EHRI Terms — no corpus, no gold labels, no scoring. The input is sent as one blob (it is
-*not* split into ISAD(G) fields the way `evaluate` treats corpus rows). A `[debug]` line on
-stderr reports the assembled prompt size (candidate menu ≈ 3.2k tokens for the 550 in-use
-terms, ≈ 5.4k for all 913) so you can see how much context each request uses.
+*not* split into ISAD(G) fields the way `evaluate` treats corpus rows). With `--model`
+omitted it uses the default model. Add `--debug` to see the assembled prompt size (candidate
+menu ≈ 3.2k tokens for the 550 in-use terms, ≈ 5.4k for all 913) and the full rendered prompt.
 
 ```bash
-# Pipe text in; prints a "rank \t score \t label \t URI" table
-cat description.txt | uv run cate label --model DeepSeek-V3.1-vLLM
+# Pipe text in (default model); prints a "rank \t score \t label \t URI" table
+cat description.txt | uv run cate label
 
 # From a file, JSON output, a custom prompt, and the full 913-term menu
 uv run cate label --model DeepSeek-V3.1-vLLM --json --candidates full \
   --prompt-template prompts/example.toml description.txt
+
+# See the exact prompt sent to the model
+cat description.txt | uv run cate label --debug
 ```
 
 Per-document predictions (with gold labels, top-5 URIs, latencies, errors) are written to a JSON file in `results/`. A tab-separated summary (tagged `llm` / `annif`) is printed to stdout for piping into scripts or spreadsheets.
@@ -166,7 +172,7 @@ src/ehri_cate/
 ├── backends/
 │   ├── llm4ssh.py        # Zero-shot LLM backend over the LiteLLM proxy
 │   └── annif_backend.py  # Supervised Annif baselines (train via CLI, suggest in-process)
-└── cli.py                # `cate evaluate` + `cate train-baselines` + `cate label`
+└── cli.py                # `cate evaluate` + `cate train-baselines` + `cate label` + `cate models`
 scripts/                  # build_omikuji_macos_arm64.sh (vendored-wheel provenance)
 tests/                    # unit tests (scorer, rate limiter, split) + guarded Annif integration test
 ```

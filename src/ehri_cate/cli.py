@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import random
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -24,25 +25,27 @@ from typing import Protocol
 import click
 from dotenv import load_dotenv
 
-from .backends.annif_backend import ALL_BACKENDS, AnnifWorkspace
-from .backends.llm4ssh import (
+# Quiet LiteLLM's noisy import-time warnings (bedrock/sagemaker botocore probes)
+# by default. This must run before litellm is imported — transitively via the
+# backend imports below — because those warnings fire at import time. `--debug`
+# raises the level back via set_debug_logging().
+logging.getLogger("LiteLLM").setLevel(logging.ERROR)
+
+from .backends.annif_backend import ALL_BACKENDS, AnnifWorkspace  # noqa: E402
+from .backends.llm4ssh import (  # noqa: E402
+    DEFAULT_MODEL,
     PromptTemplate,
+    list_models_from_env,
     load_backend_from_env,
     load_prompt_template,
     measure_messages,
+    set_debug_logging,
 )
-from .corpus import LabelledDoc, load_corpus
-from .rate_limit import NullRateLimiter, RateLimiter
-from .scoring import AggregateScores, aggregate, flat_f1_at_k, hierarchical_f1_at_k
-from .split import stratified_split
-from .vocab import Vocab
-
-
-DEFAULT_MODELS = (
-    "Mistral-Small-3.2-24B-Instruct-2506",
-    "DeepSeek-V3.1-vLLM",
-    "MiniMax-M2.5",
-)
+from .corpus import LabelledDoc, load_corpus  # noqa: E402
+from .rate_limit import NullRateLimiter, RateLimiter  # noqa: E402
+from .scoring import AggregateScores, aggregate, flat_f1_at_k, hierarchical_f1_at_k  # noqa: E402
+from .split import stratified_split  # noqa: E402
+from .vocab import Vocab  # noqa: E402
 
 
 class SuggestBackend(Protocol):
@@ -122,6 +125,41 @@ def _expand_annif(names: tuple[str, ...]) -> list[str]:
     return out
 
 
+def _validate_default_model() -> None:
+    """Confirm DEFAULT_MODEL is actually served by the proxy before relying on it.
+
+    Only called when the user didn't pass --model — an explicit model is sent
+    straight through and allowed to fail on its own. Turns a cryptic proxy error
+    into an actionable one pointing at `cate models`.
+    """
+    try:
+        available = list_models_from_env()
+    except KeyError:
+        raise click.ClickException(
+            "LLM4SSH_API_KEY is not set, so the default model can't be validated. "
+            "Set it in .env, or pass --model explicitly."
+        )
+    except Exception as e:  # noqa: BLE001 — surface any network/HTTP failure cleanly
+        raise click.ClickException(
+            f"Could not reach the model list to validate the default model: {e}. "
+            "Pass --model explicitly to skip validation."
+        )
+    if DEFAULT_MODEL not in available:
+        raise click.ClickException(
+            f"Default model {DEFAULT_MODEL!r} is not available on the proxy. "
+            "Run `cate models` to see the options, then pass one with --model."
+        )
+
+
+def _echo_rendered_prompt(backend, text: str) -> None:
+    """Dump the exact chat messages the backend will send (--debug). For evaluate,
+    pass a placeholder for `text` since the document varies per call."""
+    click.echo("[debug] --- rendered prompt ---", err=True)
+    for msg in backend.build_messages(text):
+        click.echo(f"[debug] [{msg['role']}]\n{msg['content']}", err=True)
+    click.echo("[debug] --- end rendered prompt ---", err=True)
+
+
 @click.group()
 def main() -> None:
     """EHRI-CATE: evaluate subject-indexing backends against the EHRI Terms vocab."""
@@ -194,7 +232,8 @@ def train_baselines(
 @_split_options
 @click.option("--model", "models", multiple=True,
               help="LLM4SSH model name. Repeat for multiple. If neither --model nor "
-                   "--annif is given, defaults to the three LLMs.")
+                   f"--annif is given, defaults to {DEFAULT_MODEL} (validated against "
+                   "the live model list; see `cate models`).")
 @click.option("--annif", "annif_names", multiple=True,
               type=click.Choice([*ALL_BACKENDS, "all"]),
               help="Annif baseline(s) to evaluate. Repeat or use 'all'.")
@@ -222,17 +261,24 @@ def train_baselines(
                    "0 (default) disables pacing; set e.g. 30 if your LLM4SSH key is rate-limited.")
 @click.option("--output", "output_path", type=click.Path(dir_okay=False, path_type=Path),
               help="Where to write per-doc JSON results (default: results/<timestamp>.json).")
+@click.option("--debug", is_flag=True, default=False,
+              help="Verbose output: prompt-size report, the full rendered prompt, and "
+                   "litellm internals. Off by default.")
 def evaluate(
     corpus_path: Path, vocab_path: Path, seed: int, test_size: float,
     models: tuple[str, ...], annif_names: tuple[str, ...], annif_workspace: Path,
     retrain: bool, sample_size: int, top_k: int, candidates: str,
     prompt_template_path: Path | None, workers: int, rpm: int, output_path: Path | None,
+    debug: bool,
 ) -> None:
     """Evaluate LLM and/or Annif backends on a shared held-out test sample."""
+    set_debug_logging(debug)
     annif_backends = _expand_annif(annif_names)
-    # Default to the LLM trio only when nothing at all was requested.
+    # Default to a single LLM only when nothing at all was requested; validate it
+    # against the live model list since the proxy could have it disabled.
     if not models and not annif_backends:
-        models = DEFAULT_MODELS
+        _validate_default_model()
+        models = (DEFAULT_MODEL,)
 
     # Resolve the LLM prompt (default unless a template file is given) and fingerprint
     # it, so two runs of the same model with different prompts are distinguishable in
@@ -317,11 +363,11 @@ def evaluate(
         for name in annif_backends:
             run_plan.append((name, "annif", ws.backend(name), 1))  # Annif: sequential
 
-    # Debug: how big is the LLM prompt before any doc text is added? The candidate
-    # menu dominates, so this is the floor every request pays — useful for spotting
-    # a prompt that's brushing against a model's context window.
+    # Debug (--debug): how big is the LLM prompt before any doc text is added? The
+    # candidate menu dominates, so this is the floor every request pays — useful for
+    # spotting a prompt that's brushing against a model's context window.
     llm_backends = [(lbl, be) for (lbl, kind, be, _) in run_plan if kind == "llm"]
-    if llm_backends:
+    if debug and llm_backends:
         lbl0, be0 = llm_backends[0]
         size = measure_messages(lbl0, be0.build_messages(""))
         click.echo(
@@ -330,6 +376,7 @@ def evaluate(
             f"(tokens via {size.token_method}); each doc's text adds on top.",
             err=True,
         )
+        _echo_rendered_prompt(be0, "«document text inserted here»")
 
     for label, kind, backend, be_workers in run_plan:
         click.echo(f"\n=== Running {label} ({kind}) ===", err=True)
@@ -376,7 +423,9 @@ def evaluate(
 @main.command()
 @_corpus_option
 @_vocab_option
-@click.option("--model", required=True, help="LLM4SSH model name (single model).")
+@click.option("--model", default=None,
+              help=f"LLM4SSH model name. Defaults to {DEFAULT_MODEL} (validated against "
+                   "the live model list) when omitted.")
 @click.option("--candidates", type=click.Choice(["in-use", "full"]), default="in-use",
               show_default=True,
               help="Candidate menu: 'in-use' = labels seen in the corpus (needs --corpus); "
@@ -389,23 +438,33 @@ def evaluate(
               help="How many suggestions to print.")
 @click.option("--json", "as_json", is_flag=True, default=False,
               help="Emit JSON instead of a tab-separated table.")
+@click.option("--debug", is_flag=True, default=False,
+              help="Verbose output: prompt-size report, the full rendered prompt, and "
+                   "litellm internals. Off by default.")
 @click.argument("input_file", type=click.File("r"), default="-")
 def label(
-    corpus_path: Path, vocab_path: Path, model: str, candidates: str,
-    prompt_template_path: Path | None, top_k: int, as_json: bool, input_file,
+    corpus_path: Path, vocab_path: Path, model: str | None, candidates: str,
+    prompt_template_path: Path | None, top_k: int, as_json: bool, debug: bool, input_file,
 ) -> None:
     """Suggest EHRI Terms for an ad-hoc text read from stdin (or a file).
 
     Examples:
-        cat notes.txt | cate label --model DeepSeek-V3.1-vLLM
+        cat notes.txt | cate label
         cate label --model DeepSeek-V3.1-vLLM --json description.txt
 
     Unlike `evaluate`, the input is fed to the model as a single blob; it is NOT
     parsed into the ISAD(G) fields the labelled corpus uses. No scoring is done.
     """
+    set_debug_logging(debug)
     text = input_file.read()
     if not text.strip():
         raise click.ClickException("No input text (stdin/file was empty).")
+
+    # Validate the default only when falling back to it; an explicit --model is the
+    # user's call and is sent straight through.
+    if model is None:
+        _validate_default_model()
+        model = DEFAULT_MODEL
 
     vocab = Vocab.from_turtle(vocab_path)
     if candidates == "in-use":
@@ -419,18 +478,19 @@ def label(
         model=model, vocab=vocab, candidate_uris=candidate_uris, prompt=prompt,
     )
 
-    # Debug: prompt size so truncation is visible. Report the full derived prompt
-    # and, separately, the candidate-menu portion (the dominant, fixed part).
-    messages = backend.build_messages(text)
-    full = measure_messages(model, messages)
-    menu = measure_messages(model, [{"role": "user", "content": backend.candidate_menu}])
-    click.echo(
-        f"[debug] candidates={candidates} ({len(candidate_uris)} terms)  "
-        f"menu ~{menu.tokens} tok / {menu.chars} chars  "
-        f"full prompt ~{full.tokens} tok / {full.chars} chars "
-        f"(tokens via {full.token_method}; input text {len(text)} chars)",
-        err=True,
-    )
+    # Debug (--debug): prompt size so truncation is visible, plus the full rendered
+    # prompt. Report the full derived prompt and the candidate-menu portion separately.
+    if debug:
+        full = measure_messages(model, backend.build_messages(text))
+        menu = measure_messages(model, [{"role": "user", "content": backend.candidate_menu}])
+        click.echo(
+            f"[debug] candidates={candidates} ({len(candidate_uris)} terms)  "
+            f"menu ~{menu.tokens} tok / {menu.chars} chars  "
+            f"full prompt ~{full.tokens} tok / {full.chars} chars "
+            f"(tokens via {full.token_method}; input text {len(text)} chars)",
+            err=True,
+        )
+        _echo_rendered_prompt(backend, text)
 
     preds = backend.suggest(text)
     labels = vocab.candidate_labels("en")
@@ -447,6 +507,35 @@ def label(
     else:
         for i, (u, s) in enumerate(top, start=1):
             click.echo(f"{i}\t{s:.3f}\t{labels.get(u, u)}\t{u}")
+
+
+# -- models --------------------------------------------------------------------
+
+
+@main.command(name="models")
+@click.option("--debug", is_flag=True, default=False, help="Enable litellm internals.")
+def models(debug: bool) -> None:
+    """List the models the LLM4SSH proxy serves (live query to /v1/models).
+
+    One ID per line on stdout (pipeable); the default model is marked. The list is
+    unfiltered, so it may include non-chat models. Requires LLM4SSH_API_KEY.
+    """
+    set_debug_logging(debug)
+    try:
+        available = list_models_from_env()
+    except KeyError:
+        raise click.ClickException(
+            "LLM4SSH_API_KEY is not set. Put it in .env (see .env.example)."
+        )
+    except Exception as e:  # noqa: BLE001 — surface any network/HTTP failure cleanly
+        raise click.ClickException(f"Could not fetch the model list: {e}")
+
+    if not available:
+        click.echo("(proxy returned no models)", err=True)
+        return
+    for model_id in available:
+        suffix = "  (default)" if model_id == DEFAULT_MODEL else ""
+        click.echo(f"{model_id}{suffix}")
 
 
 if __name__ == "__main__":

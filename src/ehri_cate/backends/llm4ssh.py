@@ -11,6 +11,7 @@ in src/ehri_cate/scoring.py decides what top-k to evaluate against.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import time
@@ -19,10 +20,18 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
+import httpx
 import litellm
 
 from ..rate_limit import NullRateLimiter, RateLimiter
 from ..vocab import Vocab
+
+
+# The model used when the user passes no --model. DeepSeek-V3.1 is the strongest
+# single model on the proxy (best in our eval), so it's the sensible zero-config
+# default — "best general-purpose", not the lightest. The live /v1/models list
+# carries no size metadata, so the default is pinned here rather than derived.
+DEFAULT_MODEL = "DeepSeek-V3.1-vLLM"
 
 
 # Match the body LLM4SSH returns on 429:
@@ -273,3 +282,33 @@ def load_backend_from_env(
         prompt=prompt or PromptTemplate(),
         rate_limiter=rate_limiter or NullRateLimiter(),
     )
+
+
+def list_models(api_base: str, api_key: str, timeout: float = 30.0) -> list[str]:
+    """Model IDs the LiteLLM proxy serves, via its OpenAI-style /v1/models endpoint.
+
+    Returns the IDs in the order the proxy lists them. The list is unfiltered: it
+    may include non-chat models (embeddings, rerankers), since /v1/models exposes
+    no capability metadata to filter on.
+    """
+    url = api_base.rstrip("/") + "/v1/models"
+    resp = httpx.get(url, headers={"Authorization": f"Bearer {api_key}"}, timeout=timeout)
+    resp.raise_for_status()
+    return [m["id"] for m in resp.json().get("data", []) if isinstance(m, dict) and "id" in m]
+
+
+def list_models_from_env(timeout: float = 30.0) -> list[str]:
+    """list_models() reading api_base/api_key from the environment (loaded from .env)."""
+    api_base = os.environ.get("LLM4SSH_API_BASE", "https://llm.graphia-ssh.eu")
+    api_key = os.environ["LLM4SSH_API_KEY"]  # raises KeyError if unset — by design
+    return list_models(api_base, api_key, timeout=timeout)
+
+
+def set_debug_logging(debug: bool) -> None:
+    """Toggle litellm's verbose logging. Off by default so runs stay quiet; the CLI
+    calls this with --debug. The import-time LiteLLM warnings are quieted separately
+    (before litellm is imported), since they fire too early for this to catch."""
+    logging.getLogger("LiteLLM").setLevel(logging.DEBUG if debug else logging.ERROR)
+    litellm.suppress_debug_info = not debug
+    if debug and hasattr(litellm, "_turn_on_debug"):
+        litellm._turn_on_debug()
