@@ -1,0 +1,33 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel an in-progress run when newer commits are pushed to the same ref.
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      # uv reads the pinned interpreter from .python-version (3.12) and installs
+      # it if the runner doesn't already have it.
+      - name: Sync dependencies (incl. Annif baselines)
+        run: uv sync
+
+      # The corpus + vocab data files are gitignored and absent in CI, so the
+      # data-dependent tests (Annif integration, `cate label`) skip themselves;
+      # the scorer / split / rate-limiter / prompt-template unit tests run.
+      - name: Run tests
+        run: uv run pytest
