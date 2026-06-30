@@ -39,9 +39,21 @@ def test_label_stdin_table(monkeypatch):
         input="a holocaust-related archival description",
     )
     assert res.exit_code == 0, res.output
-    assert "[debug]" in res.stderr           # prompt-size report emitted to stderr
-    assert "full prompt ~" in res.stderr
+    assert "[debug]" not in res.stderr       # quiet by default: no debug lines
     assert res.output.count("\t") >= 2       # two tab-separated suggestion rows on stdout
+
+
+def test_label_debug_shows_prompt(monkeypatch):
+    monkeypatch.setenv("LLM4SSH_API_KEY", "test-key")
+    _stub_suggest(monkeypatch)
+    res = CliRunner().invoke(
+        main, ["label", "--model", "X", "--candidates", "full", "-k", "2", "--debug"],
+        input="a holocaust-related archival description",
+    )
+    assert res.exit_code == 0, res.output
+    assert "full prompt ~" in res.stderr             # prompt-size report
+    assert "--- rendered prompt ---" in res.stderr   # full prompt dump
+    assert res.output.count("\t") >= 2               # results still on stdout
 
 
 def test_label_json(monkeypatch):

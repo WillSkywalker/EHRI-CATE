@@ -30,7 +30,7 @@ src/ehri_cate/
 ├── backends/
 │   ├── llm4ssh.py        # zero-shot LLM backend over the LiteLLM proxy
 │   └── annif_backend.py  # 5 supervised Annif baselines (train via CLI, suggest in-process)
-└── cli.py                # `cate evaluate` (LLM + --annif), `cate train-baselines`, `cate label` (ad-hoc stdin)
+└── cli.py                # `cate evaluate` (LLM + --annif), `cate train-baselines`, `cate label` (ad-hoc stdin), `cate models` (live list)
 scripts/                  # build_omikuji_macos_arm64.sh — provenance for the vendored wheel
 wheels/                   # vendored omikuji macOS-arm64 wheel (no working PyPI build exists)
 tests/                    # scorer + rate-limiter + split tests; guarded Annif integration test
@@ -52,6 +52,7 @@ Before changing any of these, surface the change to the user.
 | Primary metric | F1 at top-5 suggestions (Annif default), reported alongside micro-F1 and weighted-macro-F1 | Paper-aligned |
 | Hierarchy metric | Kiritchenko ancestor-expansion hF1 — not distance-decay | One clear semantics, no tunable knobs to defend |
 | LLM4SSH model name | Pass the bare model name; the backend prefixes `litellm_proxy/` automatically | LiteLLM SDK routing convention |
+| Default LLM | `DeepSeek-V3.1-vLLM` (`DEFAULT_MODEL`) when neither `--model` nor `--annif` is given; validated against the live `/v1/models` first. No implicit multi-model run | Best single model in our eval (not lightest). The old 3-LLM default was dropped; repeat `--model` to run several. `cate models` lists the live set |
 | Rate limit | **Off by default** (`--rpm 0`); the limiter is shared across **all** models in a run when enabled | LLM4SSH's 30 RPM/key cap was lifted for our account (2026-06). Set `--rpm 30` if using a still-capped key |
 
 ## Toolchain
@@ -71,8 +72,11 @@ uv run cate evaluate --help     # CLI help
 Set `LLM4SSH_API_KEY` (and optionally `LLM4SSH_API_BASE`) in `.env` — gitignored.
 
 ```bash
-# Default: 50 test-split rows × all 3 LLMs (Mistral-Small, DeepSeek-V3.1, MiniMax-M2.5)
+# Default: 50 test-split rows × the default LLM (DeepSeek-V3.1-vLLM), validated live
 uv run cate evaluate
+
+# List the models the proxy currently serves (default marked)
+uv run cate models
 
 # Single LLM, larger sample, custom output
 uv run cate evaluate -n 167 --model DeepSeek-V3.1-vLLM --output results/deepseek-167.json
@@ -88,6 +92,8 @@ uv run cate train-baselines --annif all
 ```
 
 The LLM4SSH RPM cap has been lifted for our account, so `--rpm` defaults to 0 (no pacing) and LLM throughput scales with `--workers`. If you run against a still-capped key, pass `--rpm 30`, which imposes a hard floor of `(sample_size × n_models) / 30` minutes regardless of `--workers`. Annif backends run sequentially and are fast at suggest time; training the NN Ensemble (TensorFlow) is the slow part of a cold run.
+
+Runs are **quiet by default**: `evaluate`/`label`/`models` take `--debug`, which surfaces the prompt-size report, the full rendered prompt, and litellm internals (litellm's import-time warnings are otherwise suppressed). The prompt-size `[debug]` lines are opt-in via this flag.
 
 ## Things deliberately not done yet
 
