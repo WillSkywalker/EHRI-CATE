@@ -57,11 +57,32 @@ uv run cate evaluate --annif all -n 100
 # Head-to-head: all 5 baselines + an LLM, scored on the same test sample
 uv run cate evaluate --annif all --model DeepSeek-V3.1-vLLM -n 50
 
+# A/B a custom prompt against the default for the same model (see prompts/example.toml).
+# The results JSON records prompt_hash so the two runs stay distinguishable.
+uv run cate evaluate --model DeepSeek-V3.1-vLLM --prompt-template prompts/example.toml -n 50
+
 # Train the baselines explicitly (otherwise `evaluate` trains them on first use)
 uv run cate train-baselines --annif all
 
 # All available CLI options
 uv run cate evaluate --help
+```
+
+### Labelling ad-hoc text
+
+`cate label` runs a single LLM over text from **stdin** (or a file) and prints suggested
+EHRI Terms — no corpus, no gold labels, no scoring. The input is sent as one blob (it is
+*not* split into ISAD(G) fields the way `evaluate` treats corpus rows). A `[debug]` line on
+stderr reports the assembled prompt size (candidate menu ≈ 3.2k tokens for the 550 in-use
+terms, ≈ 5.4k for all 913) so you can see how much context each request uses.
+
+```bash
+# Pipe text in; prints a "rank \t score \t label \t URI" table
+cat description.txt | uv run cate label --model DeepSeek-V3.1-vLLM
+
+# From a file, JSON output, a custom prompt, and the full 913-term menu
+uv run cate label --model DeepSeek-V3.1-vLLM --json --candidates full \
+  --prompt-template prompts/example.toml description.txt
 ```
 
 Per-document predictions (with gold labels, top-5 URIs, latencies, errors) are written to a JSON file in `results/`. A tab-separated summary (tagged `llm` / `annif`) is printed to stdout for piping into scripts or spreadsheets.
@@ -146,7 +167,7 @@ src/ehri_cate/
 ├── backends/
 │   ├── llm4ssh.py        # Zero-shot LLM backend over the LiteLLM proxy
 │   └── annif_backend.py  # Supervised Annif baselines (train via CLI, suggest in-process)
-└── cli.py                # `cate evaluate` + `cate train-baselines`
+└── cli.py                # `cate evaluate` + `cate train-baselines` + `cate label`
 scripts/                  # build_omikuji_macos_arm64.sh (vendored-wheel provenance)
 tests/                    # unit tests (scorer, rate limiter, split) + guarded Annif integration test
 ```

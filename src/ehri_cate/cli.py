@@ -13,6 +13,7 @@ on a sample of the held-out test split, so the comparison is apples-to-apples.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import random
 import time
@@ -24,7 +25,12 @@ import click
 from dotenv import load_dotenv
 
 from .backends.annif_backend import ALL_BACKENDS, AnnifWorkspace
-from .backends.llm4ssh import load_backend_from_env
+from .backends.llm4ssh import (
+    PromptTemplate,
+    load_backend_from_env,
+    load_prompt_template,
+    measure_messages,
+)
 from .corpus import LabelledDoc, load_corpus
 from .rate_limit import NullRateLimiter, RateLimiter
 from .scoring import AggregateScores, aggregate, flat_f1_at_k, hierarchical_f1_at_k
@@ -203,6 +209,11 @@ def train_baselines(
 @click.option("--candidates", type=click.Choice(["in-use", "full"]), default="in-use",
               show_default=True,
               help="LLM candidate menu: 'in-use' = labels seen in the corpus; 'full' = all vocab.")
+@click.option("--prompt-template", "prompt_template_path",
+              type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              help="TOML file with 'system' and/or 'user' keys overriding the LLM prompt. "
+                   "The 'user' template must contain {text} and {candidates}. "
+                   "Affects LLM backends only; Annif baselines ignore it.")
 @click.option("--workers", default=4, show_default=True, type=int,
               help="Concurrent LLM API calls. Capped in practice by --rpm. (Annif runs sequentially.)")
 @click.option("--rpm", default=30, show_default=True, type=int,
@@ -213,13 +224,23 @@ def evaluate(
     corpus_path: Path, vocab_path: Path, seed: int, test_size: float,
     models: tuple[str, ...], annif_names: tuple[str, ...], annif_workspace: Path,
     retrain: bool, sample_size: int, top_k: int, candidates: str,
-    workers: int, rpm: int, output_path: Path | None,
+    prompt_template_path: Path | None, workers: int, rpm: int, output_path: Path | None,
 ) -> None:
     """Evaluate LLM and/or Annif backends on a shared held-out test sample."""
     annif_backends = _expand_annif(annif_names)
     # Default to the LLM trio only when nothing at all was requested.
     if not models and not annif_backends:
         models = DEFAULT_MODELS
+
+    # Resolve the LLM prompt (default unless a template file is given) and fingerprint
+    # it, so two runs of the same model with different prompts are distinguishable in
+    # the results JSON.
+    prompt = load_prompt_template(prompt_template_path) if prompt_template_path else PromptTemplate()
+    prompt_hash = hashlib.sha256(
+        (prompt.system + "\x00" + prompt.user).encode("utf-8")
+    ).hexdigest()[:12]
+    if prompt_template_path:
+        click.echo(f"Using prompt template {prompt_template_path} (hash {prompt_hash})", err=True)
 
     click.echo(f"Loading corpus from {corpus_path}...", err=True)
     docs = load_corpus(corpus_path)
@@ -276,6 +297,8 @@ def evaluate(
             "n_candidate_labels": len(candidate_uris),
             "models": list(models),
             "annif": annif_backends,
+            "prompt_template": str(prompt_template_path) if prompt_template_path else None,
+            "prompt_hash": prompt_hash,
         },
         "per_backend": {},
     }
@@ -285,11 +308,26 @@ def evaluate(
     for model in models:
         be = load_backend_from_env(
             model=model, vocab=vocab, candidate_uris=candidate_uris, rate_limiter=rate_limiter,
+            prompt=prompt,
         )
         run_plan.append((model, "llm", be, workers))
     if ws is not None:
         for name in annif_backends:
             run_plan.append((name, "annif", ws.backend(name), 1))  # Annif: sequential
+
+    # Debug: how big is the LLM prompt before any doc text is added? The candidate
+    # menu dominates, so this is the floor every request pays — useful for spotting
+    # a prompt that's brushing against a model's context window.
+    llm_backends = [(lbl, be) for (lbl, kind, be, _) in run_plan if kind == "llm"]
+    if llm_backends:
+        lbl0, be0 = llm_backends[0]
+        size = measure_messages(lbl0, be0.build_messages(""))
+        click.echo(
+            f"[debug] LLM prompt static overhead (system + {len(candidate_uris)}-term menu, "
+            f"no doc text): ~{size.tokens} tokens / {size.chars} chars "
+            f"(tokens via {size.token_method}); each doc's text adds on top.",
+            err=True,
+        )
 
     for label, kind, backend, be_workers in run_plan:
         click.echo(f"\n=== Running {label} ({kind}) ===", err=True)
@@ -328,6 +366,85 @@ def evaluate(
             f"{s['weighted_macro_f1']:.4f}\t{s['hierarchical_doc_avg_f1']:.4f}\t"
             f"{res['wall_time_s']:.1f}"
         )
+
+
+# -- label ---------------------------------------------------------------------
+
+
+@main.command()
+@_corpus_option
+@_vocab_option
+@click.option("--model", required=True, help="LLM4SSH model name (single model).")
+@click.option("--candidates", type=click.Choice(["in-use", "full"]), default="in-use",
+              show_default=True,
+              help="Candidate menu: 'in-use' = labels seen in the corpus (needs --corpus); "
+                   "'full' = all vocab.")
+@click.option("--prompt-template", "prompt_template_path",
+              type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              help="TOML file with 'system' and/or 'user' keys overriding the LLM prompt. "
+                   "The 'user' template must contain {text} and {candidates}.")
+@click.option("-k", "--top-k", default=5, show_default=True, type=int,
+              help="How many suggestions to print.")
+@click.option("--json", "as_json", is_flag=True, default=False,
+              help="Emit JSON instead of a tab-separated table.")
+@click.argument("input_file", type=click.File("r"), default="-")
+def label(
+    corpus_path: Path, vocab_path: Path, model: str, candidates: str,
+    prompt_template_path: Path | None, top_k: int, as_json: bool, input_file,
+) -> None:
+    """Suggest EHRI Terms for an ad-hoc text read from stdin (or a file).
+
+    Examples:
+        cat notes.txt | cate label --model DeepSeek-V3.1-vLLM
+        cate label --model DeepSeek-V3.1-vLLM --json description.txt
+
+    Unlike `evaluate`, the input is fed to the model as a single blob; it is NOT
+    parsed into the ISAD(G) fields the labelled corpus uses. No scoring is done.
+    """
+    text = input_file.read()
+    if not text.strip():
+        raise click.ClickException("No input text (stdin/file was empty).")
+
+    vocab = Vocab.from_turtle(vocab_path)
+    if candidates == "in-use":
+        docs = load_corpus(corpus_path)
+        candidate_uris = sorted({uri for d in docs for uri in d.gold_uris})
+    else:
+        candidate_uris = sorted(vocab.concepts.keys())
+
+    prompt = load_prompt_template(prompt_template_path) if prompt_template_path else PromptTemplate()
+    backend = load_backend_from_env(
+        model=model, vocab=vocab, candidate_uris=candidate_uris, prompt=prompt,
+    )
+
+    # Debug: prompt size so truncation is visible. Report the full derived prompt
+    # and, separately, the candidate-menu portion (the dominant, fixed part).
+    messages = backend.build_messages(text)
+    full = measure_messages(model, messages)
+    menu = measure_messages(model, [{"role": "user", "content": backend.candidate_menu}])
+    click.echo(
+        f"[debug] candidates={candidates} ({len(candidate_uris)} terms)  "
+        f"menu ~{menu.tokens} tok / {menu.chars} chars  "
+        f"full prompt ~{full.tokens} tok / {full.chars} chars "
+        f"(tokens via {full.token_method}; input text {len(text)} chars)",
+        err=True,
+    )
+
+    preds = backend.suggest(text)
+    labels = vocab.candidate_labels("en")
+    top = preds[:top_k]
+
+    if as_json:
+        out = [
+            {"rank": i, "uri": u, "label": labels.get(u, u), "score": round(s, 4)}
+            for i, (u, s) in enumerate(top, start=1)
+        ]
+        click.echo(json.dumps(out, ensure_ascii=False, indent=2))
+    elif not top:
+        click.echo("(no suggestions)", err=True)
+    else:
+        for i, (u, s) in enumerate(top, start=1):
+            click.echo(f"{i}\t{s:.3f}\t{labels.get(u, u)}\t{u}")
 
 
 if __name__ == "__main__":

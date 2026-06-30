@@ -14,8 +14,10 @@ import json
 import os
 import re
 import time
+import tomllib
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 
 import litellm
 
@@ -73,6 +75,53 @@ Candidate subject terms:
 Reply with a JSON object containing the most relevant term numbers in order."""
 
 
+# Placeholders a user-supplied `user` template must contain. {text} is the
+# document and {candidates} is the numbered menu; both are mandatory because the
+# numbered-JSON output contract in _parse_label_numbers depends on the menu.
+_REQUIRED_USER_PLACEHOLDERS = ("{text}", "{candidates}")
+
+
+@dataclass(frozen=True)
+class PromptTemplate:
+    """A (system, user) prompt pair. Defaults to the shipped zero-shot prompt."""
+
+    system: str = SYSTEM_PROMPT
+    user: str = USER_TEMPLATE
+
+    def render_user(self, text: str, candidates: str) -> str:
+        # Plain replace (not str.format) so a template may contain literal braces
+        # — e.g. a JSON example — without tripping format()'s field parser.
+        return self.user.replace("{text}", text).replace("{candidates}", candidates)
+
+
+def load_prompt_template(path: str | Path) -> PromptTemplate:
+    """Load a prompt template from a TOML file with `system` and/or `user` keys.
+
+    Either key may be omitted, in which case the shipped default for that part is
+    kept — so you can override just the system prompt and leave the user template
+    untouched. The `user` template must contain the {text} and {candidates}
+    placeholders; failing fast here beats silently producing empty predictions.
+    """
+    data = tomllib.loads(Path(path).read_text(encoding="utf-8"))
+    unknown = set(data) - {"system", "user"}
+    if unknown:
+        raise ValueError(
+            f"prompt template {path}: unexpected key(s) {sorted(unknown)}; "
+            f"only 'system' and 'user' are allowed"
+        )
+    system = data.get("system", SYSTEM_PROMPT)
+    user = data.get("user", USER_TEMPLATE)
+    if not isinstance(system, str) or not isinstance(user, str):
+        raise ValueError(f"prompt template {path}: 'system' and 'user' must be strings")
+    missing = [p for p in _REQUIRED_USER_PLACEHOLDERS if p not in user]
+    if missing:
+        raise ValueError(
+            f"prompt template {path}: 'user' template is missing required "
+            f"placeholder(s) {missing}"
+        )
+    return PromptTemplate(system=system, user=user)
+
+
 @dataclass
 class LLM4SSHBackend:
     """Zero-shot LLM subject indexer over a LiteLLM proxy."""
@@ -82,6 +131,7 @@ class LLM4SSHBackend:
     candidate_uris: list[str]        # which subset of the vocab to offer as candidates
     api_base: str
     api_key: str
+    prompt: PromptTemplate = field(default_factory=PromptTemplate)
     max_tokens: int = 200
     temperature: float = 0.0
     timeout: float = 120.0
@@ -103,16 +153,25 @@ class LLM4SSHBackend:
             number_to_uri[i] = uri
         return "\n".join(lines), number_to_uri
 
+    @property
+    def candidate_menu(self) -> str:
+        """The numbered candidate-term menu sent to the model (fixed per run)."""
+        return self._candidates_text
+
+    def build_messages(self, text: str) -> list[dict]:
+        """The exact chat messages `suggest` would send for `text`."""
+        return [
+            {"role": "system", "content": self.prompt.system},
+            {"role": "user", "content": self.prompt.render_user(
+                text, self._candidates_text,
+            )},
+        ]
+
     def suggest(self, text: str) -> list[Prediction]:
         if not text.strip():
             return []
 
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": USER_TEMPLATE.format(
-                text=text, candidates=self._candidates_text,
-            )},
-        ]
+        messages = self.build_messages(text)
 
         attempts = 0
         while True:
@@ -172,11 +231,35 @@ class LLM4SSHBackend:
         return preds
 
 
+@dataclass(frozen=True)
+class PromptSize:
+    """A size report for an assembled prompt. `tokens` is approximate: for the
+    LLM4SSH proxy models we don't have the model's real tokenizer, so it's either
+    litellm's best-effort count or a ~4-chars-per-token fallback. `chars` is exact."""
+
+    chars: int
+    tokens: int
+    token_method: str  # "litellm" or "chars/4"
+
+
+def measure_messages(model: str, messages: list[dict]) -> PromptSize:
+    """Size of a chat-message list: exact chars + an approximate token count."""
+    chars = sum(len(m.get("content", "") or "") for m in messages)
+    try:
+        tokens = int(litellm.token_counter(model=f"litellm_proxy/{model}", messages=messages))
+        method = "litellm"
+    except Exception:  # noqa: BLE001 — tokenizer unknown for many proxy models
+        tokens = chars // 4
+        method = "chars/4"
+    return PromptSize(chars=chars, tokens=tokens, token_method=method)
+
+
 def load_backend_from_env(
     model: str,
     vocab: Vocab,
     candidate_uris: list[str],
     rate_limiter: RateLimiter | NullRateLimiter | None = None,
+    prompt: PromptTemplate | None = None,
 ) -> LLM4SSHBackend:
     """Convenience constructor that reads api_base/api_key from env (loaded from .env)."""
     api_base = os.environ.get("LLM4SSH_API_BASE", "https://llm.graphia-ssh.eu")
@@ -187,5 +270,6 @@ def load_backend_from_env(
         candidate_uris=candidate_uris,
         api_base=api_base,
         api_key=api_key,
+        prompt=prompt or PromptTemplate(),
         rate_limiter=rate_limiter or NullRateLimiter(),
     )
