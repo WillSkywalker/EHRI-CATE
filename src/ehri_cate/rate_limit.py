@@ -1,8 +1,8 @@
 """Thread-safe sliding-window rate limiter.
 
-Used to keep our LLM4SSH calls under the proxy's 30 RPM/user limit. One limiter
-instance should be shared across all models in a single `cate evaluate` run,
-because the limit applies to the API key as a whole, not per model.
+Paces LLM4SSH calls to a configurable requests-per-minute budget.
+When used, one instance should be shared across all models in a run,
+because such a cap applies to the API key as a whole, not per model.
 """
 
 from __future__ import annotations

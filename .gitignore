@@ -19,7 +19,11 @@ lib64/
 parts/
 sdist/
 var/
-wheels/
+wheels/*
+# Keep the vendored omikuji macOS-arm64 wheel — it has no usable PyPI build and is
+# referenced as a path source in pyproject.toml; without it, `uv sync` fails on a
+# fresh clone (even on Linux, which only needs it present to satisfy the lock).
+!wheels/omikuji-0.5.1-cp312-cp312-macosx_11_0_arm64.whl
 share/python-wheels/
 *.egg-info/
 .installed.cfg

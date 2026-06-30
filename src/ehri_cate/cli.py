@@ -215,9 +215,11 @@ def train_baselines(
                    "The 'user' template must contain {text} and {candidates}. "
                    "Affects LLM backends only; Annif baselines ignore it.")
 @click.option("--workers", default=4, show_default=True, type=int,
-              help="Concurrent LLM API calls. Capped in practice by --rpm. (Annif runs sequentially.)")
-@click.option("--rpm", default=30, show_default=True, type=int,
-              help="Global LLM requests-per-minute cap. LLM4SSH enforces 30/key. 0 disables.")
+              help="Concurrent LLM API calls. Also bounded by --rpm when that is set. "
+                   "(Annif runs sequentially.)")
+@click.option("--rpm", default=0, show_default=True, type=int,
+              help="Global LLM requests-per-minute cap, shared across all models. "
+                   "0 (default) disables pacing; set e.g. 30 if your LLM4SSH key is rate-limited.")
 @click.option("--output", "output_path", type=click.Path(dir_okay=False, path_type=Path),
               help="Where to write per-doc JSON results (default: results/<timestamp>.json).")
 def evaluate(

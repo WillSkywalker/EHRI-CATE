@@ -8,7 +8,7 @@ It builds on (and extends) Dermentzi, Bryant, Rovigo & García-González (2025),
 
 ## Requirements
 
-- Python **3.12** (pinned: the Omikuji baseline has no working Python-3.13 build; Annif's upper bound is `<3.14`).
+- Python **3.12** (pinned — newer Python is not currently supported).
 - [`uv`](https://docs.astral.sh/uv/) for environment and dependency management.
 - An API key for the GRAPHIA LLM4SSH proxy at `https://llm.graphia-ssh.eu` (only needed for the LLM backends).
 
@@ -27,10 +27,9 @@ default. For a lightweight, LLM-only environment without TensorFlow / fastText /
 uv sync --no-group baselines
 ```
 
-> **macOS (Apple Silicon) note:** Omikuji ships no working arm64 wheel, so a prebuilt one lives in
-> `wheels/` and is referenced from `pyproject.toml`. If you need to rebuild it (e.g. version bump),
-> run `scripts/build_omikuji_macos_arm64.sh` (requires `brew install rust`). On Linux/Windows, uv
-> pulls Omikuji from PyPI normally.
+> **macOS (Apple Silicon) note:** a prebuilt Omikuji arm64 wheel is vendored in `wheels/` and used
+> automatically. To rebuild it, run `scripts/build_omikuji_macos_arm64.sh` (requires `brew install
+> rust`). On Linux/Windows, Omikuji is pulled from PyPI normally.
 
 You also need the corpus and the SKOS vocabulary in `data/` (both gitignored):
 
@@ -110,7 +109,7 @@ Two honest caveats when reading the baseline-vs-LLM table:
 
 ### Rate limiting
 
-LLM4SSH enforces **30 requests/minute per API key**, shared across all models. The CLI's `--rpm` flag (default 30) paces calls accordingly, and the backend retries 429s once with backoff parsed from the response. At the default, runtime has a hard floor of `(sample_size × n_models) / 30` minutes.
+LLM throughput scales with `--workers`; `--rpm` defaults to **0 (no pacing)**. If your LLM4SSH key is rate-limited (the proxy historically enforced 30 requests/minute per key, shared across all models), pass `--rpm 30` to pace calls accordingly — runtime then has a hard floor of `(sample_size × n_models) / 30` minutes. The backend also retries 429s once with backoff parsed from the response.
 
 ## How it works
 
@@ -163,7 +162,7 @@ src/ehri_cate/
 ├── vocab.py              # SKOS Turtle → 913-concept DAG (ancestors, descendants, distance)
 ├── scoring.py            # flat F1 + Kiritchenko hierarchical F1, with three aggregations
 ├── split.py              # stratified 70/30 train/test split (iterative-stratification)
-├── rate_limit.py         # Sliding-window limiter for the 30 RPM cap
+├── rate_limit.py         # Optional sliding-window RPM limiter (off by default via --rpm 0)
 ├── backends/
 │   ├── llm4ssh.py        # Zero-shot LLM backend over the LiteLLM proxy
 │   └── annif_backend.py  # Supervised Annif baselines (train via CLI, suggest in-process)

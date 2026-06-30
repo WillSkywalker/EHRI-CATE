@@ -26,7 +26,7 @@ src/ehri_cate/
 ├── vocab.py              # SKOS Turtle loader → 913-concept DAG with ancestors/distance
 ├── scoring.py            # flat F1@5 (paper-aligned) + Kiritchenko hierarchical F1
 ├── split.py              # 70/30 stratified train/test split (iterative-stratification)
-├── rate_limit.py         # sliding-window limiter for the LLM4SSH 30 RPM cap
+├── rate_limit.py         # optional sliding-window RPM limiter (off by default; LLM4SSH cap lifted for our account)
 ├── backends/
 │   ├── llm4ssh.py        # zero-shot LLM backend over the LiteLLM proxy
 │   └── annif_backend.py  # 5 supervised Annif baselines (train via CLI, suggest in-process)
@@ -52,7 +52,7 @@ Before changing any of these, surface the change to the user.
 | Primary metric | F1 at top-5 suggestions (Annif default), reported alongside micro-F1 and weighted-macro-F1 | Paper-aligned |
 | Hierarchy metric | Kiritchenko ancestor-expansion hF1 — not distance-decay | One clear semantics, no tunable knobs to defend |
 | LLM4SSH model name | Pass the bare model name; the backend prefixes `litellm_proxy/` automatically | LiteLLM SDK routing convention |
-| Rate limit | 30 RPM per API key, shared across **all** models in a run | LLM4SSH enforces this; `--rpm 0` to disable |
+| Rate limit | **Off by default** (`--rpm 0`); the limiter is shared across **all** models in a run when enabled | LLM4SSH's 30 RPM/key cap was lifted for our account (2026-06). Set `--rpm 30` if using a still-capped key |
 
 ## Toolchain
 
@@ -87,7 +87,7 @@ uv run cate evaluate --annif all --model DeepSeek-V3.1-vLLM -n 50
 uv run cate train-baselines --annif all
 ```
 
-At 30 RPM, the LLM portion has a hard floor of `(sample_size × n_models) / 30` minutes regardless of `--workers`. Annif backends run sequentially (no rate limit) and are fast at suggest time; training the NN Ensemble (TensorFlow) is the slow part of a cold run.
+The LLM4SSH RPM cap has been lifted for our account, so `--rpm` defaults to 0 (no pacing) and LLM throughput scales with `--workers`. If you run against a still-capped key, pass `--rpm 30`, which imposes a hard floor of `(sample_size × n_models) / 30` minutes regardless of `--workers`. Annif backends run sequentially and are fast at suggest time; training the NN Ensemble (TensorFlow) is the slow part of a cold run.
 
 ## Things deliberately not done yet
 
