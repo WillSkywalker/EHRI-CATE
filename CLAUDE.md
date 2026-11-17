@@ -114,6 +114,41 @@ curl -X POST localhost:8000/suggest -H 'Content-Type: application/json' \
 
 Only `text` is required. Errors are `{"detail": ...}`: 400 bad input / unknown model, 502 upstream failure or truncation, 503 no API key. The API reads the vocab and in-use list from `src/ehri_cate/resources/` (data/ isn't deployed); the in-use list is **sorted** like the CLI's so the numbered menu — and thus the prompt — is identical to the evaluated one. When the corpus or vocab changes, re-copy `data/ehri_terms.ttl` there and run `scripts/export_in_use_terms.py`; `tests/test_api.py` fails if the snapshot drifts from the corpus.
 
+## Hierarchical F1 (ancestor-expansion)
+
+Flat F1 scores a parent/child of the gold concept the same as an unrelated one (zero). Kiritchenko's hF1 replaces every label with itself plus all SKOS `broader` ancestors, then computes set-F1:
+
+- Ĝ = ⋃ over gold *c* of `{c} ∪ ancestors(c)`; P̂ likewise for predictions
+- hP = |Ĝ ∩ P̂| / |P̂|, hR = |Ĝ ∩ P̂| / |Ĝ|, hF1 = 2·hP·hR / (hP + hR)
+
+Broader/narrower predictions earn partial credit proportional to shared ancestor path; concepts with no common ancestor score zero. No per-distance weighting. Out-of-vocabulary URIs are dropped during expansion. Implemented in `scoring.py` (`hierarchical_scores`).
+
+- Kiritchenko, Matwin & Famili (2005). *Functional Annotation of Genes Using Hierarchical Text Categorization.* Proc. BioLINK SIG, ISMB.
+- Kiritchenko, Matwin, Nock & Famili (2006). *Learning and Evaluation in the Presence of Class Hierarchies: Application to Text Categorization.* Canadian AI 2006, LNCS 4013, pp. 395–406.
+
+## Results so far
+
+Shared 50-doc test sample (`--annif all --model DeepSeek-V3.1-vLLM -n 50`, 70/30 split, seed 0), sorted by flat doc-avg F1:
+
+| Backend | Kind | Doc-avg F1 | Micro F1 | Weighted-macro F1 | Hierarchical F1 |
+|---|---|---:|---:|---:|---:|
+| **NN Ensemble** | annif | **0.302** | **0.310** | **0.339** | 0.475 |
+| Omikuji / Parabel | annif | 0.279 | 0.296 | 0.327 | 0.475 |
+| DeepSeek-V3.1-vLLM | llm | 0.240 | 0.236 | 0.277 | **0.511** |
+| MLLM | annif | 0.179 | 0.214 | 0.173 | 0.336 |
+| TF-IDF | annif | 0.164 | 0.177 | 0.215 | 0.381 |
+| fastText | annif | 0.090 | 0.087 | 0.037 | 0.349 |
+
+1. **Flat F1: supervised NN Ensemble and Omikuji lead** — same ranking the paper found. fastText lags because it's data-hungry (~1,500 train docs vs the paper's 36k) and the language-neutral analyzer gives it little on a 38%-multilingual corpus.
+2. **Hierarchical F1: the zero-shot LLM is best (0.51)** despite middling flat F1 — the "topically right, wrong granularity" effect hF1 was built to expose.
+
+Single 50-doc sample, lightly-tuned Annif defaults — not quotable as published results.
+
+Caveats when reading baseline-vs-LLM numbers:
+
+- **Multilingual handling.** Annif has no native heterogeneous-multilingual support, so baselines use the `simple` analyzer over the 38%-non-English corpus (paper noted the same). LLMs get English prompts over source-language input.
+- **Candidate sets differ by construction.** Supervised models only predict labels seen in training; the LLM gets an explicit menu. Scorer is identical (gold URIs vs top-5 predicted URIs), so numbers are comparable, but this is an inherent supervised-vs-zero-shot difference, not a bug.
+
 ## Things deliberately not done yet
 
 - **Annif hyper-parameter tuning** — the five baselines (TF-IDF, MLLM, fastText, Omikuji, NN Ensemble) are wired and trainable via `--annif`, but with sensible default params and the language-neutral `simple` analyzer; the paper's exact hyper-params weren't fully published. Tuning + a multilingual analyzer strategy are open.
