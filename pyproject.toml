@@ -12,6 +12,8 @@ dependencies = [
     "litellm>=1.50",
     "python-dotenv>=1.0",
     "click>=8.1",
+    "flask>=3.0",
+    "gunicorn>=22.0",
 ]
 
 [project.scripts]

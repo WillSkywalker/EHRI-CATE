@@ -52,6 +52,10 @@ def _parse_reset_seconds(message: str) -> float | None:
     return max(delta, 0.0)
 
 
+class TruncatedResponseError(RuntimeError):
+    """The model ran out of output tokens before producing any answer content."""
+
+
 # A predicted (uri, score). Score is in [0, 1]; the LLM doesn't actually give
 # calibrated probabilities, so we use rank-position-derived scores.
 Prediction = tuple[str, float]
@@ -141,12 +145,20 @@ class LLM4SSHBackend:
     api_base: str
     api_key: str
     prompt: PromptTemplate = field(default_factory=PromptTemplate)
-    max_tokens: int = 200
+    # Generous cap: reasoning models (Qwen3.6, GLM-5.1, MiniMax-M2.5) spend
+    # hundreds-to-thousands of tokens thinking before the ~20-token JSON answer,
+    # and 200 left Qwen3.6 with no answer at all. Non-reasoning models stop early,
+    # so the cap doesn't change their output.
+    max_tokens: int = 8192
     temperature: float = 0.0
     timeout: float = 120.0
     request_label_lang: str = "en"   # language of candidate labels shown to the LLM
     rate_limiter: RateLimiter | NullRateLimiter = field(default_factory=NullRateLimiter)
     max_429_retries: int = 2
+    # False sends vLLM's chat_template_kwargs.enable_thinking=false. Honoured by
+    # Qwen3.6 and GLM-5.1 (Qwen otherwise reasons past the request timeout on the
+    # full menu); MiniMax-M2.5 always thinks and ignores it.
+    thinking: bool = True
 
     def __post_init__(self):
         # Pre-build the candidate menu once; it's the same for every doc.
@@ -182,6 +194,10 @@ class LLM4SSHBackend:
 
         messages = self.build_messages(text)
 
+        extra = {} if self.thinking else {
+            "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
+        }
+
         attempts = 0
         while True:
             self.rate_limiter.acquire()
@@ -194,6 +210,7 @@ class LLM4SSHBackend:
                     max_tokens=self.max_tokens,
                     temperature=self.temperature,
                     timeout=self.timeout,
+                    **extra,
                 )
                 break
             except litellm.RateLimitError as e:
@@ -204,7 +221,14 @@ class LLM4SSHBackend:
                 # Cap the wait so a clock-skew bug can't hang the run.
                 time.sleep(min(wait, 70.0))
 
-        content = resp.choices[0].message.content or ""
+        choice = resp.choices[0]
+        content = choice.message.content or ""
+        if choice.finish_reason == "length" and not content.strip():
+            # Budget exhausted mid-reasoning: surface it as a per-doc error rather
+            # than silently scoring an empty prediction list as 0.
+            raise TruncatedResponseError(
+                f"{self.model} hit max_tokens={self.max_tokens} before answering"
+            )
         numbers = self._parse_label_numbers(content)
         return self._numbers_to_predictions(numbers)
 
@@ -269,6 +293,7 @@ def load_backend_from_env(
     candidate_uris: list[str],
     rate_limiter: RateLimiter | NullRateLimiter | None = None,
     prompt: PromptTemplate | None = None,
+    thinking: bool = True,
 ) -> LLM4SSHBackend:
     """Convenience constructor that reads api_base/api_key from env (loaded from .env)."""
     api_base = os.environ.get("LLM4SSH_API_BASE", "https://llm.graphia-ssh.eu")
@@ -281,6 +306,7 @@ def load_backend_from_env(
         api_key=api_key,
         prompt=prompt or PromptTemplate(),
         rate_limiter=rate_limiter or NullRateLimiter(),
+        thinking=thinking,
     )
 
 

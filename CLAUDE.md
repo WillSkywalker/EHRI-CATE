@@ -18,7 +18,7 @@ Prior art: Dermentzi, Bryant, Rovigo & García-González (2025), *Multilingual A
 
 ## Current state — MVP thin slice (subject indexing)
 
-A working CLI evaluation harness for **subject indexing** is in place, comparing zero-shot LLMs against the five supervised Annif baselines. Entity linking and date extraction (the other two pilot tracks) are not started yet.
+A working CLI evaluation harness for **subject indexing** is in place, comparing zero-shot LLMs against the five supervised Annif baselines, plus a minimal JSON web API (`app.py`) serving LLM suggestions. Entity linking and date extraction (the other two pilot tracks) are not started yet.
 
 ```
 src/ehri_cate/
@@ -30,10 +30,14 @@ src/ehri_cate/
 ├── backends/
 │   ├── llm4ssh.py        # zero-shot LLM backend over the LiteLLM proxy
 │   └── annif_backend.py  # 5 supervised Annif baselines (train via CLI, suggest in-process)
-└── cli.py                # `cate evaluate` (LLM + --annif), `cate train-baselines`, `cate label` (ad-hoc stdin), `cate models` (live list)
-scripts/                  # build_omikuji_macos_arm64.sh — provenance for the vendored wheel
+├── cli.py                # `cate evaluate` (LLM + --annif), `cate train-baselines`, `cate label` (ad-hoc stdin), `cate models` (live list)
+├── app.py                # Flask web API: GET /, GET /models, POST /suggest (HTTP twin of `cate label --json`)
+└── resources/            # committed snapshot for the API: ehri_terms.ttl + in_use_terms.txt (550 sorted URIs)
+wsgi.py, main.py          # gunicorn entry (`wsgi:application`) / dev server — same layout as ehri-skgif
+gunicorn.conf.py          # gthread workers: LLM calls outlast the sync-worker 30s timeout
+scripts/                  # build_omikuji_macos_arm64.sh (vendored-wheel provenance); export_in_use_terms.py (API snapshot)
 wheels/                   # vendored omikuji macOS-arm64 wheel (no working PyPI build exists)
-tests/                    # scorer + rate-limiter + split tests; guarded Annif integration test
+tests/                    # scorer, rate-limiter, split, backend, CLI and API tests; guarded Annif integration test
 data/                     # gitignored: corpus JSON + ehri_terms.ttl; data/annif/ = trained baselines
 results/                  # gitignored: per-run JSON dumps with per-doc predictions and scores
 ```
@@ -93,14 +97,29 @@ uv run cate train-baselines --annif all
 
 The LLM4SSH RPM cap has been lifted for our account, so `--rpm` defaults to 0 (no pacing) and LLM throughput scales with `--workers`. If you run against a still-capped key, pass `--rpm 30`, which imposes a hard floor of `(sample_size × n_models) / 30` minutes regardless of `--workers`. Annif backends run sequentially and are fast at suggest time; training the NN Ensemble (TensorFlow) is the slow part of a cold run.
 
+Reasoning models (Qwen3.6, GLM-5.1, MiniMax-M2.5) think before answering, so the backend's `max_tokens` is 8192; a reply truncated before any answer raises `TruncatedResponseError` (counted in `n_errors`) instead of scoring a silent 0. `--no-thinking` (on `evaluate`/`label`) sends vLLM's `enable_thinking=false` — needed for Qwen3.6, which otherwise reasons past the request timeout on the 550-term menu. GLM-5.1 honours it too; MiniMax-M2.5 ignores it. The setting is recorded as `config.thinking` in the results JSON.
+
 Runs are **quiet by default**: `evaluate`/`label`/`models` take `--debug`, which surfaces the prompt-size report, the full rendered prompt, and litellm internals (litellm's import-time warnings are otherwise suppressed). The prompt-size `[debug]` lines are opt-in via this flag.
+
+## Web API
+
+Minimal Flask app (`src/ehri_cate/app.py`), laid out like ehri-skgif so EHRI's `python_web` ansible role (`../iac`) deploys it unchanged: plain `uv sync`, then `gunicorn wsgi:application`, behind Apache at `/<app key>/` (prefix stripped) with `auth: basic`. Needs `LLM4SSH_API_KEY` in the environment (ansible `env:` from the vault).
+
+```bash
+uv run python main.py                                  # dev server, 127.0.0.1:8000
+uv run gunicorn --workers 2 --bind 127.0.0.1:8507 wsgi:application
+curl -X POST localhost:8000/suggest -H 'Content-Type: application/json' \
+  -d '{"text": "...", "model": "GLM-5.1", "top_k": 5, "candidates": "in-use", "thinking": true}'
+```
+
+Only `text` is required. Errors are `{"detail": ...}`: 400 bad input / unknown model, 502 upstream failure or truncation, 503 no API key. The API reads the vocab and in-use list from `src/ehri_cate/resources/` (data/ isn't deployed); the in-use list is **sorted** like the CLI's so the numbered menu — and thus the prompt — is identical to the evaluated one. When the corpus or vocab changes, re-copy `data/ehri_terms.ttl` there and run `scripts/export_in_use_terms.py`; `tests/test_api.py` fails if the snapshot drifts from the corpus.
 
 ## Things deliberately not done yet
 
 - **Annif hyper-parameter tuning** — the five baselines (TF-IDF, MLLM, fastText, Omikuji, NN Ensemble) are wired and trainable via `--annif`, but with sensible default params and the language-neutral `simple` analyzer; the paper's exact hyper-params weren't fully published. Tuning + a multilingual analyzer strategy are open.
 - **Prompt iteration / few-shot / archival-context enrichment** — a single zero-shot prompt ships as the default, but it can now be swapped per-run via `cate evaluate --prompt-template <file.toml>` (`system`/`user` keys; `user` must keep `{text}`/`{candidates}` and the numbered-JSON output contract). The default is unchanged, so comparability holds; few-shot and archival-context enrichment are still not built.
 - **Entity linking (Camps/Ghettos), date extraction** — pilot tracks #2 and #3, untouched.
-- **Web service + mock Portal UI** — roadmap steps 4 and 5.
+- **Web API beyond the minimum** — no Annif backends, term lookup, OpenAPI/Swagger UI, or rate limiting yet (Apache basic auth is the gate). **Mock Portal UI** (roadmap step 5) not started.
 
 ## Open scoping questions still on the table
 
