@@ -117,6 +117,22 @@ Two honest caveats when reading the baseline-vs-LLM table:
 
 LLM throughput scales with `--workers`; `--rpm` defaults to **0 (no pacing)**. If your LLM4SSH key is rate-limited (the proxy historically enforced 30 requests/minute per key, shared across all models), pass `--rpm 30` to pace calls accordingly — runtime then has a hard floor of `(sample_size × n_models) / 30` minutes. The backend also retries 429s once with backoff parsed from the response.
 
+## Web API
+
+A minimal JSON API serves the same LLM suggestions as `cate label`:
+
+```bash
+uv run python main.py        # dev server on 127.0.0.1:8000 (production: gunicorn wsgi:application)
+
+curl localhost:8000/models
+curl -X POST localhost:8000/suggest -H 'Content-Type: application/json' \
+  -d '{"text": "Letters from the Theresienstadt ghetto, 1943"}'
+```
+
+`POST /suggest` takes `text` (required) and optional `model`, `top_k` (1–50, default 5),
+`candidates` (`in-use`/`full`) and `thinking` (default `true`). It returns ranked
+`{rank, uri, label, score}` suggestions. Set `LLM4SSH_API_KEY` as for the CLI.
+
 ## How it works
 
 The evaluator follows the prior paper's setup for direct comparability, with one deliberate addition:
@@ -172,9 +188,13 @@ src/ehri_cate/
 ├── backends/
 │   ├── llm4ssh.py        # Zero-shot LLM backend over the LiteLLM proxy
 │   └── annif_backend.py  # Supervised Annif baselines (train via CLI, suggest in-process)
-└── cli.py                # `cate evaluate` + `cate train-baselines` + `cate label` + `cate models`
-scripts/                  # build_omikuji_macos_arm64.sh (vendored-wheel provenance)
-tests/                    # unit tests (scorer, rate limiter, split) + guarded Annif integration test
+├── cli.py                # `cate evaluate` + `cate train-baselines` + `cate label` + `cate models`
+├── app.py                # Flask web API: GET /, GET /models, POST /suggest
+└── resources/            # vocab + in-use term snapshot the API ships with
+wsgi.py, main.py          # gunicorn entry point / local dev server
+gunicorn.conf.py          # threaded workers for long LLM calls
+scripts/                  # build_omikuji_macos_arm64.sh (wheel provenance), export_in_use_terms.py
+tests/                    # unit tests (scorer, rate limiter, split, backend, CLI, API) + guarded Annif integration test
 ```
 
 ## Results so far
@@ -210,4 +230,4 @@ as published results.
 - Annif hyper-parameter tuning and a proper multilingual analyzer strategy (currently `simple` + defaults).
 - Few-shot prompting or archival-context enrichment (parent/sibling descriptions).
 - Entity linking (Camps/Ghettos) and date extraction — the other two pilot tracks.
-- Web service API and mock Portal admin UI — roadmap steps 4 and 5.
+- Web API extras (Annif backends, term lookup, OpenAPI docs) and the mock Portal admin UI — roadmap step 5.

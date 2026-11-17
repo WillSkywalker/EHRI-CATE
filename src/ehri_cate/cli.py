@@ -259,6 +259,10 @@ def train_baselines(
 @click.option("--rpm", default=0, show_default=True, type=int,
               help="Global LLM requests-per-minute cap, shared across all models. "
                    "0 (default) disables pacing; set e.g. 30 if your LLM4SSH key is rate-limited.")
+@click.option("--no-thinking", "no_thinking", is_flag=True, default=False,
+              help="Ask reasoning models to answer without thinking (vLLM "
+                   "enable_thinking=false). Honoured by Qwen3.6 and GLM-5.1; "
+                   "MiniMax-M2.5 ignores it; non-reasoning models are unaffected.")
 @click.option("--output", "output_path", type=click.Path(dir_okay=False, path_type=Path),
               help="Where to write per-doc JSON results (default: results/<timestamp>.json).")
 @click.option("--debug", is_flag=True, default=False,
@@ -268,8 +272,8 @@ def evaluate(
     corpus_path: Path, vocab_path: Path, seed: int, test_size: float,
     models: tuple[str, ...], annif_names: tuple[str, ...], annif_workspace: Path,
     retrain: bool, sample_size: int, top_k: int, candidates: str,
-    prompt_template_path: Path | None, workers: int, rpm: int, output_path: Path | None,
-    debug: bool,
+    prompt_template_path: Path | None, workers: int, rpm: int, no_thinking: bool,
+    output_path: Path | None, debug: bool,
 ) -> None:
     """Evaluate LLM and/or Annif backends on a shared held-out test sample."""
     set_debug_logging(debug)
@@ -347,6 +351,7 @@ def evaluate(
             "annif": annif_backends,
             "prompt_template": str(prompt_template_path) if prompt_template_path else None,
             "prompt_hash": prompt_hash,
+            "thinking": not no_thinking,
         },
         "per_backend": {},
     }
@@ -356,7 +361,7 @@ def evaluate(
     for model in models:
         be = load_backend_from_env(
             model=model, vocab=vocab, candidate_uris=candidate_uris, rate_limiter=rate_limiter,
-            prompt=prompt,
+            prompt=prompt, thinking=not no_thinking,
         )
         run_plan.append((model, "llm", be, workers))
     if ws is not None:
@@ -436,6 +441,10 @@ def evaluate(
                    "The 'user' template must contain {text} and {candidates}.")
 @click.option("-k", "--top-k", default=5, show_default=True, type=int,
               help="How many suggestions to print.")
+@click.option("--no-thinking", "no_thinking", is_flag=True, default=False,
+              help="Ask reasoning models to answer without thinking (vLLM "
+                   "enable_thinking=false). Honoured by Qwen3.6 and GLM-5.1; "
+                   "MiniMax-M2.5 ignores it; non-reasoning models are unaffected.")
 @click.option("--json", "as_json", is_flag=True, default=False,
               help="Emit JSON instead of a tab-separated table.")
 @click.option("--debug", is_flag=True, default=False,
@@ -444,7 +453,8 @@ def evaluate(
 @click.argument("input_file", type=click.File("r"), default="-")
 def label(
     corpus_path: Path, vocab_path: Path, model: str | None, candidates: str,
-    prompt_template_path: Path | None, top_k: int, as_json: bool, debug: bool, input_file,
+    prompt_template_path: Path | None, top_k: int, no_thinking: bool, as_json: bool,
+    debug: bool, input_file,
 ) -> None:
     """Suggest EHRI Terms for an ad-hoc text read from stdin (or a file).
 
@@ -476,6 +486,7 @@ def label(
     prompt = load_prompt_template(prompt_template_path) if prompt_template_path else PromptTemplate()
     backend = load_backend_from_env(
         model=model, vocab=vocab, candidate_uris=candidate_uris, prompt=prompt,
+        thinking=not no_thinking,
     )
 
     # Debug (--debug): prompt size so truncation is visible, plus the full rendered

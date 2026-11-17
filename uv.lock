@@ -335,6 +335,8 @@ source = { editable = "." }
 dependencies = [
     { name = "annif" },
     { name = "click" },
+    { name = "flask" },
+    { name = "gunicorn" },
     { name = "litellm" },
     { name = "python-dotenv" },
     { name = "rdflib" },
@@ -358,6 +360,8 @@ dev = [
 requires-dist = [
     { name = "annif", specifier = ">=1.4.1,<2" },
     { name = "click", specifier = ">=8.1" },
+    { name = "flask", specifier = ">=3.0" },
+    { name = "gunicorn", specifier = ">=22.0" },
     { name = "litellm", specifier = ">=1.50" },
     { name = "python-dotenv", specifier = ">=1.0" },
     { name = "rdflib", specifier = ">=7.1" },
